@@ -537,10 +537,13 @@ class App:
             first_frame=first,
             last_frame=last,
             references=references,
-            steps=self.steps,
-            layers=self.layers,
-            reuse=self.reuse,
+            steps=task.spec.steps if task.spec.steps is not None else self.steps,
+            layers=task.spec.layers if task.spec.layers is not None else self.layers,
+            reuse=task.spec.reuse if task.spec.reuse is not None else self.reuse,
             seed=seed,
+            frames=task.spec.frames,
+            render_width=task.spec.render_width,
+            render_height=task.spec.render_height,
         )
         self._log_command(task.task_id, command)
         stderr_text, code = self._run_h3(command)

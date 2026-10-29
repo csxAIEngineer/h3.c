@@ -115,6 +115,51 @@ default). Empty `ratio` is treated as `adaptive`.
 frame, otherwise the last frame, otherwise the first reference image or video,
 using the same 768p sizing rule as `h3_adapt_canvas`.
 
+### Local preset
+
+Requests without `parameters.preset`, or with `"default"`, keep the mapping
+above. The server `--steps`, `--layers`, and `--reuse` flags apply to those
+requests. `parameters.steps` replaces the server step count for that request.
+`parameters.width` and `parameters.height` (both required) replace the ratio
+canvas. `parameters.render_width` and `parameters.render_height` set the
+internal canvas and must match that output aspect. `parameters.frames`, when
+set, is passed as `--frames` instead of `--seconds`.
+
+`parameters.preset: "fast"` is the AiVideo local path. DashScope fields stay
+in the body and are still checked (`768P`, a known ratio, duration 4–15), but
+they do not select the h3 canvas or length. Unless a size or step override is
+present, the run is:
+
+```text
+--width 512 --height 512 --render-width 320 --render-height 320
+--frames 22 --steps 4 --layers 50 --reuse 1 --ssd-streaming
+```
+
+`resolution`, `ratio`, and `duration` are ignored for that invocation.
+`duration` is still returned in `usage.duration`. The file is 22 frames
+(about 0.92s), not the requested duration. `parameters.steps` replaces 4.
+`parameters.width` / `parameters.height` replace 512 square; the 320 render
+canvas is added only for that 512 square output, so a different output size
+needs its own `render_width` / `render_height` if an internal canvas is wanted.
+`parameters.frames` replaces 22. Fast always uses 50 layers and `--reuse 1`,
+including when the server was started with other quality flags.
+
+```sh
+curl -sS -X POST http://127.0.0.1:8765/api/v1/services/aigc/video-generation/video-synthesis \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "MiniMax/MiniMax-H3",
+    "input": {"prompt": "A red fox walks through fresh snow."},
+    "parameters": {
+      "resolution": "768P",
+      "ratio": "16:9",
+      "duration": 14,
+      "watermark": false,
+      "preset": "fast"
+    }
+  }'
+```
+
 ### Media
 
 `input.media` is optional. Each item is `{"type", "url"}`. URLs may be

@@ -188,6 +188,80 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(flag_values(command, "--first-frame"), ["/tmp/first.png"])
         self.assertEqual(flag_values(command, "--last-frame"), ["/tmp/last.png"])
         self.assertNotIn("--ref-image", command)
+        self.assertNotIn("--render-width", command)
+
+    def test_fast_preset_overrides_dashscope_canvas(self) -> None:
+        spec = parse_synthesis_body(
+            self._body(preset="fast", ratio="16:9", duration=14, watermark=False)
+        )
+        self.assertEqual(spec.preset, "fast")
+        self.assertEqual(spec.duration, 14)
+        self.assertEqual((spec.width, spec.height), (512, 512))
+        self.assertEqual((spec.render_width, spec.render_height), (320, 320))
+        self.assertEqual(spec.frames, 22)
+        self.assertEqual(spec.steps, 4)
+        self.assertEqual((spec.layers, spec.reuse), (50, 1))
+        command = build_h3_command(
+            h3_bin=Path("h3"),
+            model_dir=Path("MiniMax-H3"),
+            prompt=spec.prompt,
+            width=spec.width or 0,
+            height=spec.height or 0,
+            duration=spec.duration,
+            output=Path("out.mp4"),
+            first_frame=None,
+            last_frame=None,
+            references=[],
+            steps=spec.steps or 0,
+            layers=spec.layers or 0,
+            reuse=spec.reuse or 0,
+            seed=None,
+            frames=spec.frames,
+            render_width=spec.render_width,
+            render_height=spec.render_height,
+        )
+        self.assertEqual(flag_values(command, "--width"), ["512"])
+        self.assertEqual(flag_values(command, "--height"), ["512"])
+        self.assertEqual(flag_values(command, "--render-width"), ["320"])
+        self.assertEqual(flag_values(command, "--render-height"), ["320"])
+        self.assertEqual(flag_values(command, "--frames"), ["22"])
+        self.assertEqual(flag_values(command, "--steps"), ["4"])
+        self.assertNotIn("--seconds", command)
+        self.assertIn("--ssd-streaming", command)
+
+    def test_fast_keeps_explicit_steps_and_size(self) -> None:
+        spec = parse_synthesis_body(
+            self._body(preset="fast", steps=6, width=768, height=768)
+        )
+        self.assertEqual(spec.steps, 6)
+        self.assertEqual((spec.width, spec.height), (768, 768))
+        self.assertIsNone(spec.render_width)
+        self.assertEqual(spec.frames, 22)
+        plain = parse_synthesis_body(self._body())
+        self.assertEqual(plain.preset, "default")
+        self.assertEqual((plain.width, plain.height), (1344, 768))
+        self.assertIsNone(plain.frames)
+        self.assertIsNone(plain.steps)
+        self.assertIsNone(plain.render_width)
+        stepped = parse_synthesis_body(self._body(steps=6, width=512, height=512))
+        self.assertEqual(stepped.preset, "default")
+        self.assertEqual(stepped.steps, 6)
+        self.assertEqual((stepped.width, stepped.height), (512, 512))
+        self.assertIsNone(stepped.frames)
+
+    def test_fast_still_validates_dashscope_fields(self) -> None:
+        with self.assertRaises(APIError):
+            parse_synthesis_body(self._body(preset="turbo"))
+        with self.assertRaises(APIError):
+            parse_synthesis_body(self._body(preset="fast", ratio="2:1"))
+        with self.assertRaises(APIError):
+            parse_synthesis_body(self._body(preset="fast", duration=3))
+        with self.assertRaises(APIError):
+            parse_synthesis_body(self._body(width=512))
+        with self.assertRaises(APIError):
+            parse_synthesis_body(
+                self._body(width=1344, height=768, render_width=320, render_height=320)
+            )
 
     def test_png_header_size(self) -> None:
         self.assertEqual(sniff_media_size(tiny_png(9, 16)), (9, 16))
@@ -315,6 +389,40 @@ class ServerTests(unittest.TestCase):
                 return
             time.sleep(0.02)
 
+    def test_fast_preset_overrides_server_quality(self) -> None:
+        status, payload = self._post(
+            self._body(preset="fast", ratio="16:9", duration=14, watermark=False)
+        )
+        self.assertEqual(status, 200)
+        task_id = payload["output"]["task_id"]
+        done = self._wait(task_id, "SUCCEEDED")
+        self.assertEqual(done["usage"]["size"], "512*512")
+        self.assertEqual(done["usage"]["duration"], 14)
+        argv = self._argv(task_id)
+        self.assertEqual(flag_values(argv, "--width"), ["512"])
+        self.assertEqual(flag_values(argv, "--height"), ["512"])
+        self.assertEqual(flag_values(argv, "--render-width"), ["320"])
+        self.assertEqual(flag_values(argv, "--render-height"), ["320"])
+        self.assertEqual(flag_values(argv, "--frames"), ["22"])
+        self.assertNotIn("--seconds", argv)
+        self.assertEqual(flag_values(argv, "--steps"), ["4"])
+        self.assertEqual(flag_values(argv, "--layers"), ["50"])
+        self.assertEqual(flag_values(argv, "--reuse"), ["1"])
+        self.assertIn("--ssd-streaming", argv)
+
+    def test_explicit_steps_keep_dashscope_canvas(self) -> None:
+        status, payload = self._post(self._body(steps=6))
+        self.assertEqual(status, 200)
+        task_id = payload["output"]["task_id"]
+        done = self._wait(task_id, "SUCCEEDED")
+        self.assertEqual(done["usage"]["size"], "1344*768")
+        argv = self._argv(task_id)
+        self.assertEqual(flag_values(argv, "--steps"), ["6"])
+        self.assertEqual(flag_values(argv, "--seconds"), ["4"])
+        self.assertEqual(flag_values(argv, "--width"), ["1344"])
+        self.assertNotIn("--frames", argv)
+        self.assertNotIn("--render-width", argv)
+
     def test_shader_is_linked_into_server_cwd(self) -> None:
         link = self.work / "h3_shaders.metal"
         self.assertTrue(link.is_symlink())
@@ -337,6 +445,7 @@ class ServerTests(unittest.TestCase):
         self.assertIn("--ssd-streaming", argv)
         self.assertEqual(flag_values(argv, "--seconds"), ["4"])
         self.assertNotIn("--frames", argv)
+        self.assertNotIn("--render-width", argv)
         self.assertEqual(flag_values(argv, "--width"), ["1344"])
         self.assertEqual(flag_values(argv, "--height"), ["768"])
         self.assertEqual(flag_values(argv, "--steps"), ["20"])

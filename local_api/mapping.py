@@ -4,6 +4,10 @@ Canvas sizing follows ``h3_adapt_canvas`` in ``h3_host.c``: the short side is
 768 pixels, the result snaps to a multiple of 32, and the pixel count stays
 within ``768 * 1344``. Duration is an integer second count in ``[4, 15]`` and
 is passed through as ``--seconds`` so h3 can apply its 24 fps alignment.
+
+``parameters.preset`` ``fast`` is a local extension. It keeps the DashScope
+body valid, then replaces that canvas and duration with the fast h3 path:
+512 square output, 320 square internal canvas, 22 frames, 4 steps.
 """
 
 from __future__ import annotations
@@ -25,6 +29,16 @@ MAX_REFERENCES = 12
 MODEL_NAME = "MiniMax/MiniMax-H3"
 
 NAMED_RATIOS = ("16:9", "9:16", "1:1", "4:3", "3:4", "21:9")
+
+# Lowest-quality h3 path used by AiVideo for local MiniMax-H3.
+FAST_WIDTH = 512
+FAST_HEIGHT = 512
+FAST_RENDER_WIDTH = 320
+FAST_RENDER_HEIGHT = 320
+FAST_FRAMES = 22
+FAST_STEPS = 4
+FAST_LAYERS = 50
+FAST_REUSE = 1
 
 # Official DashScope names plus the AiVideo reference_* names.
 ROLE_ALIASES = {
@@ -68,8 +82,15 @@ class JobSpec:
     prompt: str
     duration: int
     ratio: str
+    preset: str
     width: int | None
     height: int | None
+    render_width: int | None
+    render_height: int | None
+    frames: int | None
+    steps: int | None
+    layers: int | None
+    reuse: int | None
     media: tuple[MediaItem, ...]
     seed: int | None
 
@@ -102,6 +123,49 @@ def adapt_canvas(width: int, height: int) -> tuple[int, int]:
         else:
             break
     return out_w, out_h
+
+
+def align_frame_count(requested: int) -> int:
+    """Match ``h3_align_frame_count``: round up to ``5 + 17*n``."""
+    value = requested if requested >= 5 else 5
+    remainder = (value - 5) % 17
+    if remainder:
+        value += 17 - remainder
+    return value
+
+
+def validate_canvas(
+    width: int,
+    height: int,
+    render_width: int | None,
+    render_height: int | None,
+) -> None:
+    if (
+        width < CANVAS_MULTIPLE
+        or height < CANVAS_MULTIPLE
+        or width % CANVAS_MULTIPLE
+        or height % CANVAS_MULTIPLE
+    ):
+        raise APIError("width and height must be multiples of 32 and at least 32")
+    if width * height > MAX_PIXELS:
+        raise APIError("canvas exceeds the released 768*1344 pixel limit")
+    if (render_width is None) != (render_height is None):
+        raise APIError("render_width and render_height must be set together")
+    if render_width is None or render_height is None:
+        return
+    if (
+        render_width < CANVAS_MULTIPLE
+        or render_height < CANVAS_MULTIPLE
+        or render_width % CANVAS_MULTIPLE
+        or render_height % CANVAS_MULTIPLE
+        or render_width > width
+        or render_height > height
+        or render_width * height != render_height * width
+    ):
+        raise APIError(
+            "render width and height must be same-aspect multiples of 32 "
+            "no larger than the output canvas"
+        )
 
 
 def canvas_for_ratio(ratio: str) -> tuple[int, int]:
@@ -196,23 +260,91 @@ def parse_synthesis_body(body: object) -> JobSpec:
     ratio = ratio_value.strip().lower()
     if ratio == "":
         ratio = "adaptive"
-    width: int | None
-    height: int | None
-    if ratio == "adaptive":
-        width, height = None, None
-    else:
-        width, height = canvas_for_ratio(ratio)
+    named_canvas = None if ratio == "adaptive" else canvas_for_ratio(ratio)
+
+    preset = _preset(parameters.get("preset", "default"))
+    steps = _optional_bounded_int(parameters, "steps", 2, 1000)
+    frames = _optional_bounded_int(parameters, "frames", 5, 362)
+    if frames is not None:
+        aligned = align_frame_count(frames)
+        if aligned < 22 or aligned > 362:
+            raise APIError("parameters.frames must align within the released 22..362 range")
+    width, height = _dimension_pair(parameters, "width", "height")
+    render_width, render_height = _dimension_pair(
+        parameters, "render_width", "render_height"
+    )
+    layers: int | None = None
+    reuse: int | None = None
+    if preset == "fast":
+        if width is None:
+            width, height = FAST_WIDTH, FAST_HEIGHT
+        if render_width is None and (width, height) == (FAST_WIDTH, FAST_HEIGHT):
+            render_width, render_height = FAST_RENDER_WIDTH, FAST_RENDER_HEIGHT
+        if frames is None:
+            frames = FAST_FRAMES
+        if steps is None:
+            steps = FAST_STEPS
+        layers = FAST_LAYERS
+        reuse = FAST_REUSE
+    elif width is None and named_canvas is not None:
+        width, height = named_canvas
+    if render_width is not None and width is None:
+        raise APIError("parameters.render_width requires parameters.width and parameters.height")
+    if width is not None and height is not None:
+        validate_canvas(width, height, render_width, render_height)
 
     seed = _optional_seed(parameters.get("seed")) if "seed" in parameters else None
     return JobSpec(
         prompt=prompt,
         duration=duration,
         ratio=ratio,
+        preset=preset,
         width=width,
         height=height,
+        render_width=render_width,
+        render_height=render_height,
+        frames=frames,
+        steps=steps,
+        layers=layers,
+        reuse=reuse,
         media=media,
         seed=seed,
     )
+
+
+def _preset(value: object) -> str:
+    if value is None:
+        return "default"
+    if not isinstance(value, str):
+        raise APIError("parameters.preset must be fast or default")
+    preset = value.strip().lower()
+    if preset == "":
+        return "default"
+    if preset not in ("fast", "default"):
+        raise APIError("parameters.preset must be fast or default")
+    return preset
+
+
+def _optional_bounded_int(
+    parameters: dict, name: str, low: int, high: int
+) -> int | None:
+    if name not in parameters or parameters[name] is None:
+        return None
+    value = _as_int(parameters[name], f"parameters.{name}")
+    if value < low or value > high:
+        raise APIError(f"parameters.{name} must be in [{low}, {high}]")
+    return value
+
+
+def _dimension_pair(parameters: dict, width_name: str, height_name: str) -> tuple[int | None, int | None]:
+    present = [name for name in (width_name, height_name) if name in parameters and parameters[name] is not None]
+    if not present:
+        return None, None
+    if len(present) != 2:
+        raise APIError(f"parameters.{width_name} and parameters.{height_name} must be set together")
+    width = _as_int(parameters[width_name], f"parameters.{width_name}")
+    height = _as_int(parameters[height_name], f"parameters.{height_name}")
+    return width, height
 
 
 def _parse_media_item(item: object, index: int) -> MediaItem:
@@ -288,11 +420,15 @@ def build_h3_command(
     layers: int,
     reuse: int,
     seed: int | None,
+    frames: int | None = None,
+    render_width: int | None = None,
+    render_height: int | None = None,
 ) -> list[str]:
     """Build the argv for one serialized h3 generation.
 
-    ``--ssd-streaming`` is unconditional. Duration uses ``--seconds`` (24 fps),
-    which h3 rounds up onto its legal frame lattice. ``--frames`` is not passed.
+    ``--ssd-streaming`` is unconditional. A frame count uses ``--frames``.
+    Otherwise duration uses ``--seconds`` (24 fps), which h3 rounds up onto
+    its legal frame lattice. The two flags are mutually exclusive.
     """
     if first_frame or last_frame:
         if references:
@@ -309,18 +445,33 @@ def build_h3_command(
         str(width),
         "--height",
         str(height),
-        "--seconds",
-        str(duration),
-        "--steps",
-        str(steps),
-        "--layers",
-        str(layers),
-        "--reuse",
-        str(reuse),
-        "--ssd-streaming",
-        "-o",
-        str(output),
     ]
+    if render_width is not None and render_height is not None:
+        command.extend(
+            [
+                "--render-width",
+                str(render_width),
+                "--render-height",
+                str(render_height),
+            ]
+        )
+    if frames is not None:
+        command.extend(["--frames", str(frames)])
+    else:
+        command.extend(["--seconds", str(duration)])
+    command.extend(
+        [
+            "--steps",
+            str(steps),
+            "--layers",
+            str(layers),
+            "--reuse",
+            str(reuse),
+            "--ssd-streaming",
+            "-o",
+            str(output),
+        ]
+    )
     if seed is not None:
         command.extend(["--seed", str(seed)])
     if first_frame is not None:

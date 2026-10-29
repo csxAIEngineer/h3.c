@@ -14,7 +14,9 @@ H3-specific Metal performance and memory optimization on M3 Max and M5 Max.
 `scripts/h3-local-api` serves the DashScope MiniMax-H3 async API on
 `127.0.0.1:8765`. AiVideo can set its video base URL to
 `http://127.0.0.1:8765` and run this `h3` binary locally. The server always
-passes `--ssd-streaming`. See [LOCAL_API.md](LOCAL_API.md) for the endpoints
+passes `--ssd-streaming`. A request can set `parameters.preset` to `fast` for
+the 512/320, 22-frame, 4-step path; bodies without a preset keep the 768P
+mapping. See [LOCAL_API.md](LOCAL_API.md) for the endpoints
 and curl submit, poll, and download examples.
 
 ```sh
